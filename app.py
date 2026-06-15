@@ -1,15 +1,11 @@
 """
 app.py
 
-Gradio interface for FitFindr. The layout and wiring are already set up —
-your job is to fill in handle_query() so it calls run_agent() and maps
-the session results to the three output panels.
+Gradio interface for FitFindr. Calls run_agent() and maps the session results
+to the output panels.
 
 Run with:
     python app.py
-
-Then open the localhost URL shown in your terminal (usually http://localhost:7860,
-but check your terminal — the port may differ).
 """
 
 import gradio as gr
@@ -18,43 +14,85 @@ from agent import run_agent
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 
-# ── query handler ─────────────────────────────────────────────────────────────
+# ── query handler ────────────────────────────────────────────────────────────
+
+def _format_listing(item: dict, price_assessment: dict | None = None) -> str:
+    """Render a listing dict + price assessment as a readable block."""
+    if not item:
+        return ""
+    title = item.get("title", "Untitled")
+    price = item.get("price", "?")
+    brand = item.get("brand", "")
+    platform = item.get("platform", "")
+    condition = item.get("condition", "")
+    size = item.get("size", "")
+    colors = ", ".join(item.get("colors") or [])
+    tags = ", ".join(item.get("style_tags") or [])
+    description = item.get("description", "")
+
+    lines = [
+        f"{title}",
+        f"${price} · {platform} · {condition} condition",
+        f"Brand: {brand}" if brand else "",
+        f"Size: {size}" if size else "",
+        f"Colors: {colors}" if colors else "",
+        f"Tags: {tags}" if tags else "",
+        "",
+        description,
+    ]
+
+    if price_assessment and price_assessment.get("message"):
+        lines.extend(["", "— Price check —", price_assessment["message"]])
+
+    return "\n".join(line for line in lines if line != "" or line == "")
+
 
 def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+    """Called by Gradio. Returns three strings, one per output panel:
+        (listing_text, outfit_suggestion, fit_card)
     """
-    Called by Gradio when the user submits a query.
+    # Guard 1: empty query
+    if not user_query or not user_query.strip():
+        return (
+            "Please type what you're looking for above — e.g. 'vintage graphic tee under $30'.",
+            "",
+            "",
+        )
 
-    Args:
-        user_query:     The text the user typed into the search box.
-        wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
+    # Pick wardrobe based on the radio button
+    if wardrobe_choice == "Empty wardrobe (new user)":
+        wardrobe = get_empty_wardrobe()
+    else:
+        wardrobe = get_example_wardrobe()
 
-    Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
+    # Run the agent — all four tools, retry logic, planning loop, etc.
+    session = run_agent(query=user_query, wardrobe=wardrobe)
 
-    TODO:
-        1. Guard against an empty query (return early with an error message).
-        2. Select the wardrobe based on wardrobe_choice.
-        3. Call run_agent() with the query and selected wardrobe.
-        4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
-        5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
-    """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    # Branch 1: search returned nothing even after retries → error in first panel
+    if session["error"]:
+        return (session["error"], "", "")
+
+    # Branch 2: happy path — build the listing text, possibly with a retry note
+    listing_text = _format_listing(session["selected_item"], session.get("price_assessment"))
+
+    if session.get("retry_notes"):
+        retry_banner = "⚙️  Auto-adjusted your search: " + "; ".join(session["retry_notes"]) + "\n\n"
+        listing_text = retry_banner + listing_text
+
+    outfit_text = session["outfit_suggestion"] or ""
+    fit_card_text = session["fit_card"] or ""
+    return (listing_text, outfit_text, fit_card_text)
 
 
-# ── interface ─────────────────────────────────────────────────────────────────
+# ── interface ────────────────────────────────────────────────────────────────
 
 EXAMPLE_QUERIES = [
     "vintage graphic tee under $30",
     "90s track jacket in size M",
     "flowy midi skirt under $40",
     "black combat boots size 8",
-    "designer ballgown size XXS under $5",   # deliberate no-results test
+    "vintage graphic tee size XS under $10",   # triggers retry-with-fallback
+    "designer ballgown size XXS under $5",     # deliberate no-results test
 ]
 
 def build_interface():
@@ -84,17 +122,17 @@ Describe what you're looking for — include size and price if you want to filte
         with gr.Row():
             listing_output = gr.Textbox(
                 label="🛍️ Top listing found",
-                lines=8,
+                lines=10,
                 interactive=False,
             )
             outfit_output = gr.Textbox(
                 label="👗 Outfit idea",
-                lines=8,
+                lines=10,
                 interactive=False,
             )
             fitcard_output = gr.Textbox(
                 label="✨ Your fit card",
-                lines=8,
+                lines=10,
                 interactive=False,
             )
 
